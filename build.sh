@@ -156,14 +156,15 @@ FFmpeg (payload/lib/libav*.so, libffmpeg.so, libffprobe.so)
     Component versions and source URLs: ffmpeg/SOURCE.txt
     (build script: .github/ffmpeg-android.sh in the upstream
     source tarball; components include x264, GPL-2.0-or-later)
-    The component source tarballs are also attached to the
-    module's GitHub Release.
+    Their source tarballs are bundled, unmodified, in
+    component-sources.tar on the module's GitHub Release.
 
 asicen-userland (payload/lib/libasicend.so, libasicenctl.so,
 firmware in payload/asicen/)
     GPL-2.0 — text: asicen-userland/LICENSE
     Source pointer and checksum: asicen-userland/SOURCE.txt
-    The source tarball is attached to the module's GitHub Release.
+    Its source tarball is bundled, unmodified, in
+    component-sources.tar on the module's GitHub Release.
 
 bun runtime (payload/lib/libbun.so)
     MIT and bundled components — see bun/LICENSE.md
