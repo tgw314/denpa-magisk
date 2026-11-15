@@ -1,0 +1,181 @@
+name: build
+
+# Build the module whenever a new upstream denpa release
+# appears. GitHub cannot trigger on another repo's releases, so a
+# schedule polls the upstream latest release; if this repo has no
+# release for that version yet, build and publish one.
+on:
+  schedule:
+    - cron: "23 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "denpa version to build (e.g. 2.45.1); empty = latest"
+        required: false
+        type: string
+      force:
+        description: "rebuild even if a release for the version exists"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve upstream version
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          if [ -n "$INPUT_VERSION" ]; then
+            V="${INPUT_VERSION#v}"
+          else
+            V=$(gh api repos/danything/denpa/releases/latest --jq .tag_name | sed 's/^v//')
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "upstream denpa version: $V"
+
+      - name: Check whether this version is already built
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+          V: ${{ steps.up.outputs.version }}
+        run: |
+          if [ "$FORCE" != "true" ] && gh release view "v$V" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "release v$V already exists; nothing to do"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build module zip
+        if: steps.check.outputs.skip != 'true'
+        env:
+          DENPA_VERSION: ${{ steps.up.outputs.version }}
+        run: ./build.sh
+
+      - name: Fetch upstream source tarball
+        if: steps.check.outputs.skip != 'true'
+        env:
+          V: ${{ steps.up.outputs.version }}
+        run: |
+          curl -fsSL -o "denpa-$V-source.tar.gz" \
+            "https://github.com/danything/denpa/archive/refs/tags/v$V.tar.gz"
+
+      - name: Fetch asicen-userland source (GPL-2.0 payload component)
+        id: asicen
+        if: steps.check.outputs.skip != 'true'
+        env:
+          V: ${{ steps.up.outputs.version }}
+        run: |
+          SRCTXT=$(unzip -p "work/denpa-$V.apk" assets/licenses/asicen-userland/SOURCE.txt)
+          URL=$(printf '%s\n' "$SRCTXT" | grep -o 'https://[^ ]*source\.tar\.gz' | head -n 1)
+          SHA=$(printf '%s\n' "$SRCTXT" | grep -oE '[0-9a-f]{64}' | head -n 1)
+          FILE=$(basename "$URL")
+          curl -fsSL -o "$FILE" "$URL"
+          echo "$SHA  $FILE" | sha256sum -c -
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch FFmpeg component sources (GPL payload components)
+        if: steps.check.outputs.skip != 'true'
+        env:
+          V: ${{ steps.up.outputs.version }}
+        run: |
+          mkdir -p mirror
+          unzip -p "work/denpa-$V.apk" assets/licenses/ffmpeg/SOURCE.txt \
+            | grep -o 'https://[^ ]*' | grep -E '\.tar\.(bz2|gz|xz)$' | sort -u \
+            > mirror-urls.txt
+          test -s mirror-urls.txt
+          while read -r u; do
+            curl -fsSL -o "mirror/$(basename "$u")" "$u"
+          done < mirror-urls.txt
+          ls -la mirror
+
+      - name: Publish release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.up.outputs.version }}
+          ASF: ${{ steps.asicen.outputs.file }}
+        run: |
+          ZIP=$(ls denpa-v"$V"-r*.zip)
+          REV=$(cat module-rev)
+          APK_SHA256=$(curl -fsSL "https://github.com/danything/denpa/releases/download/v$V/denpa-$V-android-arm64.apk.sha256" | awk '{print $1}')
+          ZIP_SHA256=$(sha256sum "$ZIP" | awk '{print $1}')
+          SRC_SHA256=$(sha256sum "denpa-$V-source.tar.gz" | awk '{print $1}')
+          ASF_SHA256=$(sha256sum "$ASF" | awk '{print $1}')
+          MIRROR_FILES=$(ls mirror/*)
+          MIRROR_LINES=$(cd mirror && sha256sum * | awk '{printf "- `%s` (sha256: `%s`)\n", $2, $1}')
+          NOTES=$(cat <<EOF
+          Module packaging denpa **v$V** for Magisk / KernelSU / APatch (module revision r$REV).
+
+          The payload is extracted unmodified from the official Android APK
+          \`denpa-$V-android-arm64.apk\` (sha256: \`$APK_SHA256\`, verified
+          against the upstream release's own .sha256 at build time).
+
+          Module zip sha256: \`$ZIP_SHA256\`
+
+          denpa (server) is AGPL-3.0-or-later and the tuner agent is MPL-2.0.
+          The upstream source tarball for v$V is attached to this release as
+          \`denpa-$V-source.tar.gz\` (sha256: \`$SRC_SHA256\`) and is also available at
+          https://github.com/danything/denpa/releases/tag/v$V
+
+          The asicen-userland source (GPL-2.0 component of the payload) is
+          attached as \`$ASF\` (sha256: \`$ASF_SHA256\`, matching
+          asicen-userland/SOURCE.txt inside the module zip).
+
+          FFmpeg component sources (GPL) mirrored on this release:
+          $MIRROR_LINES
+          EOF
+          )
+          if gh release view "v$V" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            # force rebuild: replace the assets on the existing release
+            gh release upload "v$V" --repo "$GITHUB_REPOSITORY" --clobber "$ZIP" "denpa-$V-source.tar.gz" "$ASF" $MIRROR_FILES
+            gh release edit "v$V" --repo "$GITHUB_REPOSITORY" --notes "$NOTES"
+          else
+            gh release create "v$V" --repo "$GITHUB_REPOSITORY" \
+              --title "denpa v$V (module r$REV)" --notes "$NOTES" \
+              "$ZIP" "denpa-$V-source.tar.gz" "$ASF" $MIRROR_FILES
+          fi
+
+      - name: Update update.json for manager update checks
+        if: steps.check.outputs.skip != 'true'
+        env:
+          V: ${{ steps.up.outputs.version }}
+        run: |
+          REV=$(cat module-rev)
+          VMAJOR=${V%%.*}
+          VREST=${V#*.}
+          VMINOR=${VREST%%.*}
+          VPATCH=${VREST#*.}
+          VPATCH=${VPATCH%%.*}
+          CODE=$((VMAJOR * 1000000 + VMINOR * 10000 + VPATCH * 100 + REV))
+          cat > update.json <<EOF
+          {
+            "version": "v$V-r$REV",
+            "versionCode": $CODE,
+            "zipUrl": "https://github.com/$GITHUB_REPOSITORY/releases/download/v$V/denpa-v$V-r$REV.zip",
+            "changelog": "https://github.com/$GITHUB_REPOSITORY/releases/tag/v$V"
+          }
+          EOF
+          git config user.name "tgw314"
+          git config user.email "me@k0k1.dev"
+          git add update.json
+          if git diff --cached --quiet; then
+            echo "update.json unchanged"
+          else
+            git commit -m "update.json: denpa v$V-r$REV"
+            git push origin HEAD:main
+          fi
