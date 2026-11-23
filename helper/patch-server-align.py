@@ -4,10 +4,14 @@
 
 Usage: patch-server-align.py <payload/server dir>
 
-The server bundle (assets/server.zip in the APK) carries the compiled
-hwenc chunk that builds the ffmpeg encoder argument arrays. Two branches
-there return an encoder array for the MediaCodec way: hwArgs() (recording,
-and the hardware probe) and liveHwArgs() (live). Both get
+The server bundle (assets/server.zip in the APK) carries one compiled
+chunk that builds the ffmpeg encoder argument arrays. Its file name is
+the chunker's, not denpa's, and it changed upstream (chunks/hwenc.js up
+to 2.59.0, chunks/transcode.js in 2.61.0), so the chunk is found by
+content: the JS files under the given directory are scanned for the
+anchors below, exactly one file may carry them. Two branches there
+return an encoder array for the MediaCodec way: hwArgs() (recording, and
+the hardware probe) and liveHwArgs() (live). Both get
 
     ...mediacodecAlign(codec),
 
@@ -22,17 +26,16 @@ av1_mediacodec would make ffmpeg die on an unknown option. Every other
 way (vaapi/qsv/amf/nvenc/rkmpp/videotoolbox), the software encoders and
 the rest of the server are untouched.
 
-Fail-closed: every anchor must match exactly as expected, otherwise the
-script exits 1 and the build stops (nothing is written in that case).
-That is also how an upstream change is noticed: the anchors are tied to
-the compiled hwenc chunk, not to the denpa source, so when upstream drops
-a new server bundle this script refuses to build until it is re-derived.
+Fail-closed: every anchor must match exactly as expected, and exactly one
+file may carry them, otherwise the script exits 1 and the build stops
+(nothing is written in that case). That is also how an upstream change is
+noticed: the anchors are tied to the compiled chunk, not to the denpa
+source, so when upstream drops a new server bundle this script refuses to
+build until it is re-derived.
 """
 
 import sys
 import pathlib
-
-HWENC = "app/build/server/chunks/hwenc.js"
 
 # Anchor 1: the MediaCodec encoder array of both hwArgs() and liveHwArgs().
 # It must occur exactly twice (recording + live).
@@ -74,17 +77,48 @@ def fail(message):
     sys.exit(1)
 
 
+def find_chunk(root):
+    """The one JS file of the bundle that carries the anchors (rel, text)."""
+    hits = []
+    near = []  # files that look like the chunk but miss the anchors
+    for path in sorted(root.rglob("*.js")):
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        rel = path.relative_to(root)
+        if CALL_ANCHOR in text or DEF_ANCHOR in text:
+            hits.append((rel, text))
+        elif "mediacodecName" in text or "function highProfile" in text:
+            near.append(rel)
+    if len(hits) > 1:
+        fail(
+            "the mediacodec anchors occur in %d files of %s (%s), expected 1"
+            % (len(hits), root, ", ".join(str(rel) for rel, _ in hits))
+        )
+    if not hits:
+        message = "no JS file under %s carries the mediacodec anchors" % root
+        if near:
+            message += " (mediacodecName/highProfile found in %s)" % ", ".join(
+                str(rel) for rel in near
+            )
+        fail(message)
+    return hits[0]
+
+
 def main(argv):
     if len(argv) != 2:
         fail("usage: patch-server-align.py <payload/server dir>")
     root = pathlib.Path(argv[1])
-    path = root / HWENC
-    if not path.is_file():
-        fail("%s not found under %s" % (HWENC, root))
-    text = path.read_text(encoding="utf-8")
+    if not root.is_dir():
+        fail("%s is not a directory" % root)
+    chunk, text = find_chunk(root)
+    chunk = str(chunk)
 
     if "mediacodecAlign" in text:
-        fail("%s is already patched (mediacodecAlign present)" % HWENC)
+        fail("%s is already patched (mediacodecAlign present)" % chunk)
 
     call_hits = text.count(CALL_ANCHOR)
     if call_hits != CALL_COUNT:
@@ -130,12 +164,12 @@ def main(argv):
     if delta != delta_calls + delta_def:
         fail("unexpected size change (%d bytes)" % delta)
 
-    path.write_text(patched, encoding="utf-8")
+    (root / chunk).write_text(patched, encoding="utf-8")
 
     for number, line in enumerate(patched.splitlines(), 1):
         if "mediacodecAlign(codec)" in line or '"align_width"' in line:
-            print("   %s:%d: %s" % (HWENC, number, line.strip()))
-    print("   patched %s (+%d bytes)" % (HWENC, delta))
+            print("   %s:%d: %s" % (chunk, number, line.strip()))
+    print("   patched %s (+%d bytes)" % (chunk, delta))
 
 
 if __name__ == "__main__":
