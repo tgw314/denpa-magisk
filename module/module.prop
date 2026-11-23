@@ -3,5 +3,5 @@ name=denpa
 version=v2.46.0-r2 (denpa v2.46.0)
 versionCode=2460002
 author=tgw314 (module) / danything (denpa)
-description=Runs the denpa server and tuner agent as root, using the official APK payload unmodified. No app install or USB permission needed.
+description=Runs the denpa server and tuner agent as root. Payload from the official APK, with FFmpeg patched so Qualcomm MediaCodec encodes 1440-wide video without streaks. No app install or USB permission needed.
 updateJson=https://raw.githubusercontent.com/tgw314/denpa-magisk/main/update.json

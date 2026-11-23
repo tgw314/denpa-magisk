@@ -26,7 +26,7 @@ for f in libdenpa_agent.so libbun.so libffmpeg.so libffprobe.so \
 	set_perm "$MODPATH/payload/lib/$f" 0 0 0755
 done
 set_perm "$MODPATH/ctl.sh" 0 0 0755
-ui_print "- denpa installed (payload: official APK $DENPA_VERSION, unmodified)"
+ui_print "- denpa installed (payload: official APK $DENPA_VERSION + FFmpeg align patch)"
 ui_print "- Config: /data/adb/denpa/config/tuners.json"
 ui_print "- Recordings: /data/adb/denpa/media"
 ui_print "- Do NOT use the official denpa app at the same time"
