@@ -4,6 +4,14 @@ name: build
 # appears. GitHub cannot trigger on another repo's releases, so a
 # schedule polls the upstream latest release; if this repo has no
 # release for that version yet, build and publish one.
+#
+# The module does not ship the APK's FFmpeg untouched: build.sh splices in
+# FFmpeg built from the same upstream source plus
+# patches/ffmpeg-mediacodec-align.patch (see patches/README.md), so this
+# workflow builds that first with upstream's own
+# .github/ffmpeg-android.sh (helper/build-ffmpeg.sh does the work). The
+# result is cached: it only costs the ~30 minutes again when the upstream
+# FFmpeg version, the patch or the NDK changes.
 on:
   schedule:
     - cron: "23 */6 * * *"
@@ -60,12 +68,6 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Build module zip
-        if: steps.check.outputs.skip != 'true'
-        env:
-          DENPA_VERSION: ${{ steps.up.outputs.version }}
-        run: ./build.sh
-
       - name: Fetch upstream source tarball
         if: steps.check.outputs.skip != 'true'
         env:
@@ -73,6 +75,87 @@ jobs:
         run: |
           curl -fsSL -o "denpa-$V-source.tar.gz" \
             "https://github.com/danything/denpa/archive/refs/tags/v$V.tar.gz"
+
+      # Two keys: the dependencies (opus, SVT-AV1, x264, dav1d, zimg) only
+      # follow the upstream source and the NDK, the final libraries also
+      # follow this repo's patches. Editing a patch therefore reuses the
+      # dependencies.
+      - name: Cache keys for the patched FFmpeg
+        id: ffkey
+        if: steps.check.outputs.skip != 'true'
+        env:
+          V: ${{ steps.up.outputs.version }}
+        run: |
+          set -eu
+          src="denpa-$V-source.tar.gz"
+          src16=$(sha256sum "$src" | cut -c1-16)
+          patch16=$(sha256sum patches/ffmpeg-*.patch | sha256sum | cut -c1-16)
+          echo "deps=ffmpeg-android-arm64-deps-$src16" >> "$GITHUB_OUTPUT"
+          echo "out=ffmpeg-android-arm64-$src16-$patch16" >> "$GITHUB_OUTPUT"
+
+      - name: Restore patched FFmpeg libraries
+        id: ffout
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: work/ffmpeg
+          key: ${{ steps.ffkey.outputs.out }}
+
+      - name: Restore FFmpeg dependencies
+        id: ffdeps
+        if: steps.check.outputs.skip != 'true' && steps.ffout.outputs.cache-hit != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-android-arm64-deps
+          key: ${{ steps.ffkey.outputs.deps }}
+
+      # The NDK version is the one upstream's own Android workflow pins for
+      # this tag (helper/build-ffmpeg.sh --ndk-version reads it), plus the
+      # tools that .github/ffmpeg-android.sh needs.
+      - name: Set up NDK and tools for the FFmpeg build
+        if: steps.check.outputs.skip != 'true' && steps.ffout.outputs.cache-hit != 'true'
+        env:
+          DENPA_VERSION: ${{ steps.up.outputs.version }}
+          DENPA_SOURCE_TARBALL: denpa-${{ steps.up.outputs.version }}-source.tar.gz
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends \
+            nasm meson ninja-build autoconf automake libtool pkg-config cmake > /dev/null
+          NDK_VERSION=$(./helper/build-ffmpeg.sh --ndk-version)
+          echo "NDK $NDK_VERSION"
+          # yes は sdkmanager が閉じると SIGPIPE で終わるので、終わり方を見ない
+          (yes || true) | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            --install "ndk;$NDK_VERSION" > /dev/null
+          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      - name: Build patched FFmpeg
+        if: steps.check.outputs.skip != 'true' && steps.ffout.outputs.cache-hit != 'true'
+        env:
+          DENPA_VERSION: ${{ steps.up.outputs.version }}
+          DENPA_SOURCE_TARBALL: denpa-${{ steps.up.outputs.version }}-source.tar.gz
+        run: ./helper/build-ffmpeg.sh
+
+      # 依存は組み終えた直後に保存する (ffmpeg のビルドが落ちても残る)
+      - name: Save FFmpeg dependencies
+        if: steps.check.outputs.skip != 'true' && steps.ffout.outputs.cache-hit != 'true' && steps.ffdeps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ffmpeg-android-arm64-deps
+          key: ${{ steps.ffkey.outputs.deps }}
+
+      - name: Save patched FFmpeg libraries
+        if: steps.check.outputs.skip != 'true' && steps.ffout.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: work/ffmpeg
+          key: ${{ steps.ffkey.outputs.out }}
+
+      - name: Build module zip
+        if: steps.check.outputs.skip != 'true'
+        env:
+          DENPA_VERSION: ${{ steps.up.outputs.version }}
+        run: ./build.sh
 
       - name: Fetch asicen-userland source (GPL-2.0 payload component)
         id: asicen
@@ -110,7 +193,38 @@ jobs:
           ASF: ${{ steps.asicen.outputs.file }}
         run: |
           mv "$ASF" component-sources/
-          SUMS=$(cd component-sources && sha256sum -- *)
+          # The two files that make the payload different from the APK's own
+          # (licenses/SOURCE-denpa.txt "MODIFIED PARTS"). Their source is the
+          # FFmpeg tarballs above plus these, so they belong in the bundle.
+          mkdir -p component-sources/denpa-magisk
+          cp patches/ffmpeg-mediacodec-align.patch helper/patch-server-align.py \
+            component-sources/denpa-magisk/
+          cat > component-sources/denpa-magisk/README.txt <<'PATCHES'
+          What this module changes in the denpa payload
+          ============================================
+
+          ffmpeg-mediacodec-align.patch
+              Applied to the upstream FFmpeg source (the ffmpeg-*.tar.*
+              tarballs in this bundle) by upstream's own
+              .github/ffmpeg-android.sh from the denpa source tarball of
+              the same tag. Adds -align_width/-align_height to
+              h264_mediacodec and hevc_mediacodec so the coded size is
+              aligned to the 128x32 that Qualcomm's MediaCodec (Venus,
+              c2.qti.*) reads its input buffer with. The nine FFmpeg
+              libraries in the module zip are built from this.
+
+          patch-server-align.py
+              Applied to app/build/server/chunks/hwenc.js from
+              assets/server.zip in the official APK. Adds
+              ...mediacodecAlign(codec) to the two MediaCodec encoder
+              argument arrays (h264/hevc only), i.e. the two options the
+              patch above introduces. The patched chunk is the upstream
+              one plus this insert; nothing else in the server changes.
+
+          The corresponding sources are the tarballs in this bundle and
+          this file.
+          PATCHES
+          SUMS=$(cd component-sources && find . -type f -print | sed 's|^\./||' | sort | xargs -r sha256sum)
           printf '%s\n' "$SUMS" > component-sources/SHA256SUMS
           tar -cf component-sources.tar -C component-sources .
           {
@@ -137,9 +251,32 @@ jobs:
           NOTES=$(cat <<EOF
           Module packaging denpa **v$V** for Magisk / KernelSU / APatch (module revision r$REV).
 
-          The payload is extracted unmodified from the official Android APK
+          The payload is extracted from the official Android APK
           \`denpa-$V-android-arm64.apk\` (sha256: \`$APK_SHA256\`, verified
-          against the upstream release's own .sha256 at build time).
+          against the upstream release's own .sha256 at build time), with
+          two exceptions (see \`licenses/SOURCE-denpa.txt\` in the zip):
+
+          - The nine FFmpeg libraries (\`libav*.so\`, \`libsw*.so\`,
+            \`libffmpeg.so\`, \`libffprobe.so\`) are rebuilt from the FFmpeg
+            source of the same upstream tag with
+            \`ffmpeg-mediacodec-align.patch\`, which adds
+            \`-align_width\`/\`-align_height\` to \`h264_mediacodec\` and
+            \`hevc_mediacodec\`. FFmpeg's existing 16-pixel alignment is not
+            enough for Qualcomm's MediaCodec (Venus, \`c2.qti.*\`), which
+            reads a 1440-wide buffer with a stride of 1536; the module asks
+            for a 128x32 coded alignment, and the existing
+            \`h264_metadata\`/\`hevc_metadata\` filter crops the picture back
+            to the display size. 1440-wide H.264/HEVC no longer comes out
+            with horizontal streaks and a green band.
+          - The server bundle's \`hwenc.js\` passes those two options for
+            H.264/H.265 MediaCodec encoding (AV1 MediaCodec and the other
+            encoding ways are untouched).
+
+          Both patches are inside \`component-sources.tar\` under
+          \`denpa-magisk/\`, together with the FFmpeg component sources they
+          apply to. The rest of the payload — denpa's own native libraries,
+          the software encoders, every other server file — is the APK's
+          file, byte for byte.
 
           Module zip sha256: \`$ZIP_SHA256\`
 
