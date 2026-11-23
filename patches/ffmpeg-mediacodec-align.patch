@@ -1,0 +1,92 @@
+diff --git a/libavcodec/mediacodecenc.c b/libavcodec/mediacodecenc.c
+index 507c48df9c..7516d75cae 100644
+--- a/libavcodec/mediacodecenc.c
++++ b/libavcodec/mediacodecenc.c
+@@ -85,6 +85,10 @@ typedef struct MediaCodecEncContext {
+     int extract_extradata;
+     // Ref. MediaFormat KEY_OPERATING_RATE
+     int operating_rate;
++    // Alignment of the coded size, to match the stride/slice-height the
++    // encoder reads from the input buffer.
++    int align_width;
++    int align_height;
+     int async_mode;
+ 
+     AVMutex input_mutex;
+@@ -225,6 +229,12 @@ static void copy_frame_to_buffer(AVCodecContext *avctx, const AVFrame *frame,
+     uint8_t *dst_data[4] = {};
+     int dst_linesize[4] = {};
+ 
++    // Zero the whole buffer so that the padding introduced by the alignment
++    // is well defined: encoders may read the padding through their own stride
++    // and slice height, and unwritten gralloc memory leaks into the encoded
++    // picture as garbage.
++    memset(dst, 0, size);
++
+     if (avctx->pix_fmt == AV_PIX_FMT_YUV420P) {
+         dst_data[0] = dst;
+         dst_data[1] = dst + s->width * s->height;
+@@ -404,6 +414,16 @@ static av_cold int mediacodec_init(AVCodecContext *avctx)
+     if (ret < 0)
+         return ret;
+ 
++    // The coded size must stay a multiple of the chroma size, and the crop
++    // margin signalled to h264_metadata is expressed in units of two luma
++    // samples: powers of two guarantee both.
++    if ((s->align_width  && (s->align_width  & (s->align_width  - 1))) ||
++        (s->align_height && (s->align_height & (s->align_height - 1)))) {
++        av_log(avctx, AV_LOG_ERROR,
++               "align_width and align_height must be powers of two, or zero to disable\n");
++        return AVERROR(EINVAL);
++    }
++
+     if (s->use_ndk_codec < 0)
+         s->use_ndk_codec = !av_jni_get_java_vm(avctx);
+ 
+@@ -447,13 +467,17 @@ static av_cold int mediacodec_init(AVCodecContext *avctx)
+     }
+ 
+     ff_AMediaFormat_setString(format, "mime", codec_mime);
+-    // Workaround the alignment requirement of mediacodec. We can't do it
+-    // silently for AV_PIX_FMT_MEDIACODEC.
++    // Workaround the alignment requirement of mediacodec: some encoders
++    // (e.g. Qualcomm c2.qti.*) read the input buffer with a larger stride
++    // and slice height than the coded size, so align_width/align_height must
++    // match that requirement. We can't do it silently for
++    // AV_PIX_FMT_MEDIACODEC, and zero disables the workaround.
+     if (avctx->pix_fmt != AV_PIX_FMT_MEDIACODEC &&
+         (avctx->codec_id == AV_CODEC_ID_H264 ||
+-         avctx->codec_id == AV_CODEC_ID_HEVC)) {
+-        s->width = FFALIGN(avctx->width, 16);
+-        s->height = FFALIGN(avctx->height, 16);
++         avctx->codec_id == AV_CODEC_ID_HEVC) &&
++        s->align_width && s->align_height) {
++        s->width = FFALIGN(avctx->width, s->align_width);
++        s->height = FFALIGN(avctx->height, s->align_height);
+     } else {
+         s->width = avctx->width;
+         s->height = avctx->height;
+@@ -1135,6 +1159,11 @@ enum MediaCodecAvcLevel {
+ static const AVOption h264_options[] = {
+     COMMON_OPTION
+ 
++    { "align_width", "Coded width alignment, zero to disable",
++                OFFSET(align_width), AV_OPT_TYPE_INT, {.i64 = 16}, 0, 512, VE },
++    { "align_height", "Coded height alignment, zero to disable",
++                OFFSET(align_height), AV_OPT_TYPE_INT, {.i64 = 16}, 0, 512, VE },
++
+     FF_AVCTX_PROFILE_OPTION("baseline",             NULL, VIDEO, AV_PROFILE_H264_BASELINE)
+     FF_AVCTX_PROFILE_OPTION("constrained_baseline", NULL, VIDEO, AV_PROFILE_H264_CONSTRAINED_BASELINE)
+     FF_AVCTX_PROFILE_OPTION("main",                 NULL, VIDEO, AV_PROFILE_H264_MAIN)
+@@ -1207,6 +1236,11 @@ enum MediaCodecHevcLevel {
+ static const AVOption hevc_options[] = {
+     COMMON_OPTION
+ 
++    { "align_width", "Coded width alignment, zero to disable",
++                OFFSET(align_width), AV_OPT_TYPE_INT, {.i64 = 16}, 0, 512, VE },
++    { "align_height", "Coded height alignment, zero to disable",
++                OFFSET(align_height), AV_OPT_TYPE_INT, {.i64 = 16}, 0, 512, VE },
++
+     FF_AVCTX_PROFILE_OPTION("main",   NULL, VIDEO, AV_PROFILE_HEVC_MAIN)
+     FF_AVCTX_PROFILE_OPTION("main10", NULL, VIDEO, AV_PROFILE_HEVC_MAIN_10)
+ 
