@@ -54,7 +54,21 @@ SRC="$WORK/ffmpeg-src"
 JNI="$OUT/jniLibs/arm64-v8a"
 MARKER="$OUT/.built-from-denpa-magisk"
 
-say() { echo "== $* =="; }
+# --ndk-version is read as NDK_VERSION=$(./helper/build-ffmpeg.sh
+# --ndk-version), so only the version may go to stdout: keep the download
+# and extraction chatter on stderr in that mode.
+NDK_ONLY=0
+if [ "${1:-}" = --ndk-version ]; then
+	NDK_ONLY=1
+fi
+
+say() {
+	if [ "$NDK_ONLY" = 1 ]; then
+		echo "== $* ==" >&2
+	else
+		echo "== $* =="
+	fi
+}
 die() { echo "build-ffmpeg: $*" >&2; exit 1; }
 
 mkdir -p "$WORK"
@@ -86,7 +100,7 @@ NDK_VERSION=$(sed -n 's/^[[:space:]]*NDK_VERSION:[[:space:]]*"\([^"]*\)".*$/\1/p
 	"$SRC/.github/workflows/android.yml" | head -n 1)
 [ -n "$NDK_VERSION" ] || die "cannot read NDK_VERSION from the upstream Android workflow"
 
-if [ "${1:-}" = --ndk-version ]; then
+if [ "$NDK_ONLY" = 1 ]; then
 	echo "$NDK_VERSION"
 	exit 0
 fi
