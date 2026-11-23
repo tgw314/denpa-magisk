@@ -13,7 +13,8 @@
 #      patches/ffmpeg-mediacodec-align.patch (-align_width/-align_height
 #      for h264_mediacodec/hevc_mediacodec). helper/build-ffmpeg.sh
 #      produces that set; CI runs it before this script.
-#   2. the extracted server bundle's hwenc chunk is patched
+#   2. the extracted server bundle's chunk that builds the encoder
+#      argument arrays is patched
 #      (helper/patch-server-align.py) so the MediaCodec encoders are
 #      asked for a 128x32 coded alignment. Without it the new FFmpeg
 #      options would never be passed and the patch would do nothing.
@@ -173,9 +174,19 @@ echo "== payload: denpa server files (assets/server.zip) =="
 
 echo "== payload: server bundle: mediacodec align 128x32 =="
 python3 "$PROJ/helper/patch-server-align.py" "$STAGE/payload/server"
-grep -q 'mediacodecAlign(codec)' \
-	"$STAGE/payload/server/app/build/server/chunks/hwenc.js" ||
-	die "hwenc.js is not patched"
+# The chunk that carries the encoder argument arrays is found by content
+# (its file name is the bundler's and changes: chunks/hwenc.js up to
+# 2.59.0, chunks/transcode.js in 2.61.0). Read the patched path back for
+# the check and for the provenance note below.
+SERVER_CHUNK=$(grep -rlF --include='*.js' 'function mediacodecAlign(codec)' \
+	"$STAGE/payload/server" | sed "s|^$STAGE/payload/server/||") || :
+if [ -z "$SERVER_CHUNK" ] ||
+	[ "$(printf '%s\n' "$SERVER_CHUNK" | wc -l)" -ne 1 ]; then
+	die "expected one patched server chunk, found: ${SERVER_CHUNK:-none}"
+fi
+grep -qF '...mediacodecAlign(codec),' \
+	"$STAGE/payload/server/$SERVER_CHUNK" ||
+	die "$SERVER_CHUNK is not patched"
 
 echo "== payload: MediaCodec encoder helper (app_process DEX) =="
 # A port of the app's Encoders.kt (helper/DenpaEncoders.java),
@@ -251,18 +262,20 @@ NOT unmodified:
       in component-sources.tar on the module's GitHub Release; the build
       driver is helper/build-ffmpeg.sh in the module source.
 
-  payload/server/app/build/server/chunks/hwenc.js
+  payload/server/$SERVER_CHUNK
       The upstream chunk with the 128x32 alignment passed to the
-      MediaCodec encoders. Both places that build a MediaCodec encoder
-      argument array (hwArgs, used by recording and the hardware probe,
-      and liveHwArgs) gain '...mediacodecAlign(codec)' and a helper that
-      returns ['-align_width', '128', '-align_height', '32'] for h264 and
-      hevc only (AV1, VA-API, QSV, AMF, NVENC, RKMPP and the software
-      encoders are untouched). hwenc.js.map still describes the
-      unpatched file. Applied by patch-server-align.py (in this directory
-      and in the module source, which also carries it in
-      component-sources.tar); it fails instead of guessing when the
-      bundle's anchors change.
+      MediaCodec encoders (found by content: chunks/hwenc.js up to
+      2.59.0, chunks/transcode.js in 2.61.0). Both places that build a
+      MediaCodec encoder argument array (hwArgs, used by recording and
+      the hardware probe, and liveHwArgs) gain
+      '...mediacodecAlign(codec)' and a helper that returns
+      ['-align_width', '128', '-align_height', '32'] for h264 and hevc
+      only (AV1, VA-API, QSV, AMF, NVENC, RKMPP and the software
+      encoders are untouched). The chunk's .js.map, when the bundle
+      ships one, still describes the unpatched file. Applied by
+      patch-server-align.py (in this directory and in the module source,
+      which also carries it in component-sources.tar); it fails instead
+      of guessing when the bundle's anchors change.
 
 So the Corresponding Source for this module is the denpa v$DENPA_VERSION
 source tarball attached to the module's GitHub Release, plus
@@ -288,8 +301,8 @@ denpa server (payload/server/)
     AGPL-3.0-or-later — text: LICENSE
     Source: denpa-<version>-source.tar.gz attached to the module's
     GitHub Release (or the danything/denpa tag of the same version)
-    payload/server/app/build/server/chunks/hwenc.js is patched, see
-    "Module patches" below.
+    payload/server/app/build/server/chunks/ (the chunk that builds the
+    MediaCodec encoder args) is patched, see "Module patches" below.
 
 denpa tuner agent (payload/lib/libdenpa_agent.so)
     MPL-2.0 — text: MPL-2.0.txt
@@ -328,9 +341,9 @@ Module patches (what this module changes in the payload)
                                     (GPL-3.0, applies to the FFmpeg
                                     source in component-sources.tar)
     patch-server-align.py           patches the server bundle's
-                                    hwenc.js (AGPL-3.0). The modified
-                                    chunk is the upstream one plus
-                                    this patch; both are also in
+                                    MediaCodec chunk (AGPL-3.0). The
+                                    modified chunk is the upstream one
+                                    plus this patch; both are also in
                                     component-sources.tar on the
                                     module's GitHub Release.
 
@@ -342,8 +355,8 @@ cat > "$STAGE/payload/SOURCE.txt" << 'EOF'
 The binaries in this directory were extracted from the official denpa
 Android APK, except the FFmpeg libraries (libav*.so, libsw*.so,
 libffmpeg.so, libffprobe.so), which are rebuilt from the upstream
-FFmpeg source with this module's align patch, and
-server/app/build/server/chunks/hwenc.js, which is patched. See
+FFmpeg source with this module's align patch, and the server chunk
+that builds the MediaCodec encoder args, which is patched. See
 ../licenses/SOURCE-denpa.txt ("MODIFIED PARTS"). Their license texts,
 component map and source pointers are in ../licenses/ (start with
 ../licenses/README.txt). The Corresponding Source is attached to the

@@ -214,8 +214,10 @@ jobs:
               libraries in the module zip are built from this.
 
           patch-server-align.py
-              Applied to app/build/server/chunks/hwenc.js from
-              assets/server.zip in the official APK. Adds
+              Applied to the server chunk that builds the
+              MediaCodec encoder args (found by content;
+              chunks/hwenc.js up to 2.59.0, chunks/transcode.js in
+              2.61.0) from assets/server.zip in the official APK. Adds
               ...mediacodecAlign(codec) to the two MediaCodec encoder
               argument arrays (h264/hevc only), i.e. the two options the
               patch above introduces. The patched chunk is the upstream
@@ -268,7 +270,8 @@ jobs:
             \`h264_metadata\`/\`hevc_metadata\` filter crops the picture back
             to the display size. 1440-wide H.264/HEVC no longer comes out
             with horizontal streaks and a green band.
-          - The server bundle's \`hwenc.js\` passes those two options for
+          - The server bundle's MediaCodec chunk (`chunks/hwenc.js`,
+            `chunks/transcode.js` in 2.61.0) passes those two options for
             H.264/H.265 MediaCodec encoding (AV1 MediaCodec and the other
             encoding ways are untouched).
 
