@@ -14,6 +14,14 @@ patch stop the build instead of half-applying.
 Nothing here is upstreamed as of this writing; the patches are kept
 here, next to the build that needs them.
 
+The libraries are not built by hand and pasted into the module:
+`helper/build-ffmpeg.sh` takes denpa's source tarball for the tag,
+drops this repo's `patches/` into its `patches/`, and runs upstream's
+script for arm64 with the NDK upstream pins. CI does exactly this
+before calling `build.sh` and caches the result; locally, run
+`helper/build-ffmpeg.sh` once (or point `FFMPEG_DIR` at an existing
+`jniLibs/arm64-v8a`).
+
 ## ffmpeg-mediacodec-align.patch
 
 Adds `-align_width` / `-align_height` to `h264_mediacodec` and
@@ -39,4 +47,26 @@ server patch (`helper/patch-server-align.py`) is what passes
 codecs the server patch changes; AV1 MediaCodec, VA-API, NVENC, QSV,
 AMF, RKMPP and the software encoders are untouched.
 
+One cost: the coded picture is 1536×1088 instead of 1440×1088 in that
+example, so at the same `-b:v` each pixel gets slightly fewer bits
+(~7% fewer).
+
 The patch applies to FFmpeg 9.0.2 and 9.1 (the file is identical in both).
+
+## Server bundle patch (helper/patch-server-align.py)
+
+The FFmpeg patch only adds the options; something has to pass them.
+`build.sh` runs `helper/patch-server-align.py` on the extracted server
+bundle: it scans the bundle's JS files for the anchors of the code
+that builds the MediaCodec encoder argument arrays (located by
+content, not by file name — upstream renamed the chunk from
+`chunks/hwenc.js` to `chunks/transcode.js` in denpa 2.61.0) and
+rewrites those arrays to pass `-align_width 128 -align_height 32` for
+H.264/H.265 MediaCodec only, in both the recording (`hwArgs`) and live
+(`liveHwArgs`) paths.
+
+It is fail-closed: unless exactly one file carries the anchors, with
+the expected occurrence counts, the build stops instead of shipping
+an unpatched (or half-patched) bundle. When upstream changes that
+code's shape, the anchors have to be re-derived — the same goes for
+the FFmpeg patch above, which is applied with `--fuzz=0`.

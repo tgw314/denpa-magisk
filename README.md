@@ -19,25 +19,13 @@ Run [denpa](https://github.com/danything/denpa) (server + tuner agent) as root o
 
 ## How It Works
 
-- **Payload:** Extracted from the official Android APK at build time (verified against the upstream release's `.sha256`). No denpa binaries are committed to this repo. Two parts of the payload are patched rather than shipped as-is — see [Patched payload](#patched-payload-ffmpeg-mediacodec-align) below.
+- **Payload:** Extracted from the official Android APK at build time (verified against the upstream release's `.sha256`). No denpa binaries are committed to this repo. Two parts of the payload are patched rather than shipped as-is — see [Patched payload](#patched-payload) below.
 - **Networking:** The tuner agent listens on port 25252 (TLS). The bundled server connects to it via `127.0.0.1` with a pairing token.
 - **Hardware encoding:** Supported MediaCodec encoders are detected at startup via a small `app_process` DEX helper (`helper/`) and passed as `MEDIACODEC_ENCODERS`.
 
-## Patched payload: FFmpeg MediaCodec align
+## Patched payload
 
-FFmpeg's MediaCodec encoder aligns the coded size to 16 before handing the frame to the hardware encoder. That is enough for most devices, but Qualcomm's Venus encoder (`c2.qti.*`, e.g. on a Snapdragon 8s Gen 3) reads the input buffer with a stride of `ALIGN(width, 128)` and a slice height of `ALIGN(height, 32)`. FFmpeg writes the frame with `stride == width`, so any width that is not a multiple of 128 is read back off by up to 127 bytes per row: a 1440×1080 H.264/H.265 recording comes out with horizontal streaks and a green band along the bottom. 1920 is fine, which is why this only shows up on some sizes.
-
-So the module ships FFmpeg built with [`patches/ffmpeg-mediacodec-align.patch`](patches/ffmpeg-mediacodec-align.patch), which adds `-align_width` / `-align_height` to [`libavcodec/mediacodecenc.c`](https://github.com/FFmpeg/FFmpeg/blob/n9.0.2/libavcodec/mediacodecenc.c) for `h264_mediacodec` and `hevc_mediacodec`. Both options default to the upstream 16, so an FFmpeg built with the patch behaves exactly like the stock one unless the options are passed; the padding is zeroed so it cannot leak into the picture as garbage. `helper/patch-server-align.py` then finds the server bundle's chunk that builds the MediaCodec encoder argument arrays (by content, not by file name — upstream renamed it from `chunks/hwenc.js` to `chunks/transcode.js` in 2.61.0) and patches it so those arrays pass `-align_width 128 -align_height 32`. The extra border is cropped back to the display size by the `h264_metadata`/`hevc_metadata` filter that this encoder path already uses, so the recording is still 1440×1080.
-
-Scope of the change:
-
-- Only H.264 and H.265 MediaCodec encoding (recording, live and the startup probe). AV1 MediaCodec, VA-API, QSV, AMF, NVENC, Rockchip MPP, VideoToolbox and the software encoders are untouched.
-- The coded picture is 1536×1088 instead of 1440×1088 for that example, so at the same `-b:v` each pixel gets slightly fewer bits (~7% fewer).
-- Everything else in the payload — denpa's own native libraries, every other server file — is the APK's file, byte for byte.
-
-The libraries are **not** built by hand and pasted into the module: `helper/build-ffmpeg.sh` takes denpa's source tarball for the tag, drops this repo's `patches/` into its `patches/` (upstream's own `.github/ffmpeg-android.sh` applies them with `patch -p1 --fuzz=0`), and runs that script for arm64 with the NDK upstream pins. CI does exactly this before calling `build.sh`, and caches the result; locally, run `helper/build-ffmpeg.sh` once (or point `FFMPEG_DIR` at an existing `jniLibs/arm64-v8a`).
-
-When upstream changes the server bundle, the patch script's anchors no longer match (or more than one chunk carries them) and the build stops instead of shipping an unpatched chunk; the patch then has to be re-derived. The same goes for the FFmpeg patch, which is applied with `--fuzz=0`.
+Two payload parts are patched at build time so Qualcomm Venus encoders (`c2.qti.*`) don't corrupt picture widths that aren't multiples of 128 (e.g. 1440×1080): FFmpeg is built with [`patches/ffmpeg-mediacodec-align.patch`](patches/ffmpeg-mediacodec-align.patch), and the server bundle is patched to pass `-align_width 128 -align_height 32` to the H.264/H.265 MediaCodec encoders. Everything else in the payload is the APK's file, byte for byte. Details: [patches/README.md](patches/README.md).
 
 ## License & Source Code
 
